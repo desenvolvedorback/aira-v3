@@ -1,3 +1,8 @@
+import warnings
+warnings.filterwarnings("ignore", category=FutureWarning)
+
+
+
 import os
 import json
 import time
@@ -259,9 +264,9 @@ def admin_logout():
     return redirect(url_for('admin_login'))
 
 # ---------------- Run ----------------
-if __name__ == '__main__':
-    # porta para Render: usar PORT env se existir
-    port = int(os.getenv('PORT', 5000))
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 10000))
+    app.run(host="0.0.0.0", port=port)
     # se TF-IDF fallback e já há dados, inicializar vectorizer com perguntas
     if not EMBED_AVAILABLE:
         s = SessionLocal()
@@ -273,4 +278,5 @@ if __name__ == '__main__':
             except Exception as e:
                 print('TFIDF fit error:', e)
         s.close()
+
     app.run(host='0.0.0.0', port=port, debug=True)
