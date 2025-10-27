@@ -1,0 +1,12 @@
+body{font-family: Arial, Helvetica, sans-serif; background:#f7f7f8; color:#111;margin:0;padding:0}
+.container{max-width:820px;margin:28px auto;padding:20px;background:#fff;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+h1{margin-top:0}
+.chat-box{min-height:200px;border:1px solid #eee;padding:12px;border-radius:6px;overflow:auto}
+#askForm{display:flex;gap:8px;margin-top:12px}
+#askForm input{flex:1;padding:8px;border-radius:6px;border:1px solid #ddd}
+#askForm button{padding:8px 14px;border-radius:6px;background:#2d89ff;color:#fff;border:none}
+.footer{margin-top:12px;color:#666}
+.train-form input,.train-form textarea{width:100%;padding:8px;margin-bottom:8px;border-radius:6px;border:1px solid #ddd}
+.qa-table{width:100%;border-collapse:collapse}
+.qa-table th, .qa-table td{border-bottom:1px solid #eee;padding:8px;text-align:left}
+.error{background:#ffe6e6;padding:8px;border-radius:6px;color:#900}
