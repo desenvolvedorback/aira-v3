@@ -264,20 +264,7 @@ def admin_logout():
     return redirect(url_for('admin_login'))
 
 # ---------------- Run ----------------
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
 
-    # se TF-IDF fallback e já há dados, inicializar vectorizer com perguntas
-    if not EMBED_AVAILABLE:
-        s = SessionLocal()
-        rows = s.query(QA).all()
-        docs = [r.question for r in rows] if rows else []
-        if docs:
-            try:
-                tfidf_vectorizer.fit(docs)
-            except Exception as e:
-                print('TFIDF fit error:', e)
-        s.close()
-
-    # Executa o app (somente uma vez)
-    app.run(host='0.0.0.0', port=port, debug=False)
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port)
