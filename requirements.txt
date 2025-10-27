@@ -1,0 +1,12 @@
+flask>=2.2.0
+sqlalchemy>=1.4
+requests>=2.28
+bcrypt>=4.0
+# Sentence-transformers e huggingface (pin para evitar erro cached_download)
+sentence-transformers==2.2.2
+huggingface_hub==0.24.6
+scikit-learn>=1.2.2
+wikipedia
+youtube-search-python
+googlesearch-python
+beautifulsoup4

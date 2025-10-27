@@ -1,0 +1,449 @@
+# Airá 2.0 - Projeto completo (Arquivos concatenados)
+# Copie cada seção para criar os arquivos correspondentes no seu projeto.
+# Estrutura recomendada:
+# aira/
+# ├── app.py
+# ├── requirements.txt
+# ├── templates/
+# │   ├── index.html
+# │   ├── admin_login.html
+# │   └── admin_panel.html
+# └── static/
+#     ├── styles.css
+#     └── app.js
+#
+# Instruções de uso (local / Render):
+# 1) Crie a pasta `aira` e crie os arquivos conforme as marcações abaixo.
+# 2) Crie um virtualenv e instale dependências:
+#    python -m venv venv
+#     venv\Scripts\activate 
+#    pip install -r requirements.txt
+# 3) Variáveis de ambiente (opcionais):
+#    AIRA_DB (default: aira.db)
+#    AIRA_ADMIN_CODES (ex: 1234,4321,9999)  -> códigos numéricos separados por vírgula
+#    AIRA_ADMIN_NICKS (ex: riri,fifi,lulu)   -> nicks correspondentes
+# 4) Rodar local:
+#    python app.py
+# 5) Para Deploy no Render: suba o repositório e configure o start command `python app.py`.
+#
+# ------------------ FILE: requirements.txt ------------------
+
+flask>=2.2.0
+sqlalchemy>=1.4
+requests>=2.28
+bcrypt>=4.0
+# Sentence-transformers e huggingface (pin para evitar erro cached_download)
+sentence-transformers==2.2.2
+huggingface_hub==0.24.6
+scikit-learn>=1.2.2
+
+# ------------------ FILE: app.py ------------------
+
+import os
+import json
+import time
+from functools import wraps
+from flask import Flask, request, jsonify, render_template, redirect, url_for, session
+from sqlalchemy import create_engine, Column, Integer, String, Text
+from sqlalchemy.orm import declarative_base, sessionmaker
+import requests
+import bcrypt
+
+# Tentar carregar sentence-transformers, mas preparar fallback para TF-IDF
+try:
+    from sentence_transformers import SentenceTransformer, util
+    EMBED_AVAILABLE = True
+except Exception as e:
+    print("[WARN] sentence-transformers não disponível, usando fallback TF-IDF. Erro:", e)
+    EMBED_AVAILABLE = False
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    from sklearn.metrics.pairwise import cosine_similarity
+
+# ---------------- Config ----------------
+DB_PATH = os.getenv("AIRA_DB", "aira.db")
+WIKI_API = "https://pt.wikipedia.org/w/api.php"
+EMBED_MODEL_NAME = os.getenv("AIRA_EMBED_MODEL", "all-MiniLM-L6-v2")
+ADMIN_CODES = os.getenv("AIRA_ADMIN_CODES", "1234,4321,9999").split(",")
+ADMIN_NICKS = os.getenv("AIRA_ADMIN_NICKS", "admin1,admin2,admin3").split(",")
+SECRET_KEY = os.getenv("AIRA_SECRET_KEY", "troca_essa_senha_para_deploy")
+
+# ---------------- DB ----------------
+Base = declarative_base()
+engine = create_engine(f"sqlite:///{DB_PATH}", connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(bind=engine)
+
+class QA(Base):
+    __tablename__ = "qa"
+    id = Column(Integer, primary_key=True)
+    question = Column(Text, nullable=False)
+    answer = Column(Text, nullable=False)
+    source = Column(String(200), nullable=True)
+    embedding = Column(Text, nullable=True)  # json array or None
+
+Base.metadata.create_all(engine)
+
+# ---------------- Embeddings setup ----------------
+if EMBED_AVAILABLE:
+    print("Carregando modelo de embeddings:", EMBED_MODEL_NAME)
+    embed_model = SentenceTransformer(EMBED_MODEL_NAME)
+else:
+    tfidf_vectorizer = TfidfVectorizer()
+    # prepararemos o TF-IDF no primeiro uso
+
+# ---------------- App ----------------
+app = Flask(__name__)
+app.secret_key = SECRET_KEY
+
+# Helper: hashing admin numeric codes (we store hashed versions in memory)
+def hash_code(code: str) -> str:
+    return bcrypt.hashpw(code.encode(), bcrypt.gensalt()).decode()
+
+# Inicializar admin list (in-memory hashed codes) - também exibirá nick quando logar
+ADMIN_STORE = []
+for i, code in enumerate(ADMIN_CODES):
+    nick = ADMIN_NICKS[i] if i < len(ADMIN_NICKS) else f"admin{i+1}"
+    ADMIN_STORE.append({"nick": nick, "code_hash": bcrypt.hashpw(code.strip().encode(), bcrypt.gensalt()).decode()})
+
+# Decorator admin required
+def admin_required(f):
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not session.get("admin"):
+            return redirect(url_for('admin_login'))
+        return f(*args, **kwargs)
+    return decorated
+
+# ---------------- Utilities ----------------
+
+def embed_text(text: str):
+    if EMBED_AVAILABLE:
+        vec = embed_model.encode(text, convert_to_numpy=True).tolist()
+        return json.dumps(vec)
+    else:
+        return None
+
+def compute_similarity(question: str, candidates: list):
+    # candidates: list of dicts with 'id', 'question', 'answer', 'embedding'
+    if not candidates:
+        return None
+    if EMBED_AVAILABLE:
+        q_vec = embed_model.encode(question, convert_to_numpy=True).tolist()
+        best = None
+        best_score = -1
+        for c in candidates:
+            if not c.get('embedding'):
+                continue
+            score = util.cos_sim(q_vec, json.loads(c['embedding'])).item()
+            if score > best_score:
+                best_score = score
+                best = c
+        return {'score': float(best_score) if best is not None else 0.0, 'qa': best}
+    else:
+        # TF-IDF fallback: build matrix with question + candidates
+        docs = [question] + [c['question'] for c in candidates]
+        X = tfidf_vectorizer.fit_transform(docs)
+        sims = cosine_similarity(X[0:1], X[1:]).flatten()
+        idx = sims.argmax()
+        return {'score': float(sims[idx]), 'qa': candidates[idx]}
+
+
+def search_wikipedia_pt(query, sentences=3):
+    try:
+        params = {
+            "action": "query",
+            "format": "json",
+            "prop": "extracts",
+            "exintro": True,
+            "explaintext": True,
+            "titles": query,
+            "redirects": 1,
+            "formatversion": 2
+        }
+        r = requests.get(WIKI_API, params=params, timeout=6)
+        data = r.json()
+        if "query" in data and data["query"].get("pages"):
+            page = data["query"]["pages"][0]
+            if page.get("extract"):
+                text = page["extract"]
+                sents = text.split(". ")
+                return ". ".join(sents[:sentences]) + ("" if len(sents)<=sentences else "...")
+        # fallback opensearch
+        params2 = {"action":"opensearch","search":query,"limit":3,"namespace":0,"format":"json"}
+        r2 = requests.get(WIKI_API, params=params2, timeout=6)
+        arr = r2.json()
+        if len(arr)>=4 and len(arr[1])>0:
+            title = arr[1][0]
+            return search_wikipedia_pt(title, sentences)
+    except Exception as e:
+        print("WIKI ERROR:", e)
+    return None
+
+# ---------------- Routes ----------------
+@app.route("/")
+def index():
+    return render_template('index.html')
+
+@app.route('/ask', methods=['POST'])
+def ask():
+    data = request.json or request.form
+    q = (data.get('question') or '').strip()
+    if not q:
+        return jsonify({'error':'Pergunta vazia'}), 400
+
+    # 1) verificar DB por similaridade
+    s = SessionLocal()
+    rows = s.query(QA).all()
+    candidates = [{'id':r.id,'question':r.question,'answer':r.answer,'embedding':r.embedding} for r in rows]
+    sim = compute_similarity(q, candidates)
+    if sim and sim.get('score') and sim['score'] >= 0.70:
+        qa = sim['qa']
+        s.close()
+        return jsonify({'answer': qa['answer'], 'source': qa.get('source','db'), 'cached': True})
+
+    # 2) buscar wiki
+    wiki = search_wikipedia_pt(q)
+    if wiki:
+        answer = wiki
+        source = 'wikipedia'
+    else:
+        answer = 'Não encontrei em fontes locais. Gostaria que eu buscasse na web (Google/YouTube)?'
+        source = 'none'
+
+    # salvar no DB se houver resposta
+    try:
+        emb = embed_text(q)
+        qa = QA(question=q, answer=answer, source=source, embedding=emb)
+        s.add(qa)
+        s.commit()
+    except Exception as e:
+        s.rollback()
+        print('DB save error:', e)
+    finally:
+        s.close()
+
+    return jsonify({'answer': answer, 'source': source, 'cached': False})
+
+# Admin login page (numeric code)
+@app.route('/admin', methods=['GET','POST'])
+def admin_login():
+    if request.method == 'GET':
+        return render_template('admin_login.html')
+    code = request.form.get('code','').strip()
+    if not code:
+        return render_template('admin_login.html', error='Código vazio')
+    # checar códigos
+    for adm in ADMIN_STORE:
+        try:
+            if bcrypt.checkpw(code.encode(), adm['code_hash'].encode()):
+                session['admin'] = True
+                session['admin_nick'] = adm['nick']
+                return redirect(url_for('admin_panel'))
+        except Exception:
+            continue
+    return render_template('admin_login.html', error='Código inválido')
+
+@app.route('/admin/panel')
+@admin_required
+def admin_panel():
+    s = SessionLocal()
+    rows = s.query(QA).order_by(QA.id.desc()).limit(200).all()
+    s.close()
+    return render_template('admin_panel.html', qas=rows, nick=session.get('admin_nick','admin'))
+
+@app.route('/admin/train', methods=['POST'])
+@admin_required
+def admin_train():
+    q = request.form.get('question','').strip()
+    a = request.form.get('answer','').strip()
+    if not q or not a:
+        return redirect(url_for('admin_panel'))
+    s = SessionLocal()
+    try:
+        emb = embed_text(q)
+        qa = QA(question=q, answer=a, source='manual', embedding=emb)
+        s.add(qa)
+        s.commit()
+    except Exception as e:
+        s.rollback()
+        print('train error', e)
+    finally:
+        s.close()
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/delete/<int:qa_id>', methods=['POST'])
+@admin_required
+def admin_delete(qa_id):
+    s = SessionLocal()
+    row = s.query(QA).filter_by(id=qa_id).first()
+    if row:
+        s.delete(row)
+        s.commit()
+    s.close()
+    return redirect(url_for('admin_panel'))
+
+@app.route('/admin/logout')
+def admin_logout():
+    session.pop('admin', None)
+    session.pop('admin_nick', None)
+    return redirect(url_for('admin_login'))
+
+# ---------------- Run ----------------
+if __name__ == '__main__':
+    # porta para Render: usar PORT env se existir
+    port = int(os.getenv('PORT', 5000))
+    # se TF-IDF fallback e já há dados, inicializar vectorizer com perguntas
+    if not EMBED_AVAILABLE:
+        s = SessionLocal()
+        rows = s.query(QA).all()
+        docs = [r.question for r in rows] if rows else []
+        if docs:
+            try:
+                tfidf_vectorizer.fit(docs)
+            except Exception as e:
+                print('TFIDF fit error:', e)
+        s.close()
+    app.run(host='0.0.0.0', port=port, debug=True)
+
+# ------------------ FILE: templates/index.html ------------------
+
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Airá — Chat</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Airá</h1>
+    <div id="chat" class="chat-box"></div>
+    <form id="askForm">
+      <input id="question" placeholder="Faça sua pergunta aqui..." autocomplete="off">
+      <button type="submit">Perguntar</button>
+    </form>
+    <p class="footer"><a href="/admin">Painel admin</a></p>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>
+
+# ------------------ FILE: templates/admin_login.html ------------------
+
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Airá — Admin Login</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Login Admin</h1>
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/admin">
+      <label>Código numérico</label>
+      <input name="code" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="10">
+      <button type="submit">Entrar</button>
+    </form>
+    <p><a href="/">Voltar ao chat</a></p>
+  </div>
+</body>
+</html>
+
+# ------------------ FILE: templates/admin_panel.html ------------------
+
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Airá — Painel Admin</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Painel Admin — {{ nick }}</h1>
+    <p><a href="/admin/logout">Sair</a> | <a href="/">Abrir chat</a></p>
+
+    <h2>Treinar manualmente</h2>
+    <form method="post" action="/admin/train" class="train-form">
+      <input name="question" placeholder="Pergunta (ex: Quem foi Pelé?)" required>
+      <textarea name="answer" placeholder="Resposta" required></textarea>
+      <button type="submit">Salvar</button>
+    </form>
+
+    <h2>Base de conhecimento (últimos 200)</h2>
+    <table class="qa-table">
+      <thead><tr><th>ID</th><th>Pergunta</th><th>Resposta</th><th>Fonte</th><th></th></tr></thead>
+      <tbody>
+      {% for qa in qas %}
+        <tr>
+          <td>{{ qa.id }}</td>
+          <td>{{ qa.question[:80] }}{% if qa.question|length > 80 %}...{% endif %}</td>
+          <td>{{ qa.answer[:120] }}{% if qa.answer|length > 120 %}...{% endif %}</td>
+          <td>{{ qa.source }}</td>
+          <td>
+            <form method="post" action="/admin/delete/{{ qa.id }}" onsubmit="return confirm('Deletar?');">
+              <button type="submit">Deletar</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>
+
+# ------------------ FILE: static/styles.css ------------------
+
+body{font-family: Arial, Helvetica, sans-serif; background:#f7f7f8; color:#111;margin:0;padding:0}
+.container{max-width:820px;margin:28px auto;padding:20px;background:#fff;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+h1{margin-top:0}
+.chat-box{min-height:200px;border:1px solid #eee;padding:12px;border-radius:6px;overflow:auto}
+#askForm{display:flex;gap:8px;margin-top:12px}
+#askForm input{flex:1;padding:8px;border-radius:6px;border:1px solid #ddd}
+#askForm button{padding:8px 14px;border-radius:6px;background:#2d89ff;color:#fff;border:none}
+.footer{margin-top:12px;color:#666}
+.train-form input,.train-form textarea{width:100%;padding:8px;margin-bottom:8px;border-radius:6px;border:1px solid #ddd}
+.qa-table{width:100%;border-collapse:collapse}
+.qa-table th, .qa-table td{border-bottom:1px solid #eee;padding:8px;text-align:left}
+.error{background:#ffe6e6;padding:8px;border-radius:6px;color:#900}
+
+# ------------------ FILE: static/app.js ------------------
+
+document.addEventListener('DOMContentLoaded', ()=>{
+  const form = document.getElementById('askForm')
+  const chat = document.getElementById('chat')
+  const qInput = document.getElementById('question')
+
+  function addMessage(text, cls='bot'){
+    const d = document.createElement('div')
+    d.className = 'msg ' + cls
+    d.textContent = text
+    chat.appendChild(d)
+    chat.scrollTop = chat.scrollHeight
+  }
+
+  form.addEventListener('submit', async (e)=>{
+    e.preventDefault()
+    const q = qInput.value.trim()
+    if(!q) return
+    addMessage('Você: ' + q, 'user')
+    qInput.value = ''
+    addMessage('Airá está pensando...')
+    try{
+      const res = await fetch('/ask', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({question:q})})
+      const data = await res.json()
+      if(data.error) addMessage('Erro: '+data.error)
+      else addMessage('Airá: ' + data.answer)
+    }catch(err){
+      addMessage('Erro ao conectar com o servidor')
+      console.error(err)
+    }
+  })
+})
