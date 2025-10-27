@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Airá — Painel Admin</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Painel Admin — {{ nick }}</h1>
+    <p><a href="/admin/logout">Sair</a> | <a href="/">Abrir chat</a></p>
+
+    <h2>Treinar manualmente</h2>
+    <form method="post" action="/admin/train" class="train-form">
+      <input name="question" placeholder="Pergunta (ex: Quem foi Pelé?)" required>
+      <textarea name="answer" placeholder="Resposta" required></textarea>
+      <button type="submit">Salvar</button>
+    </form>
+
+    <h2>Base de conhecimento (últimos 200)</h2>
+    <table class="qa-table">
+      <thead><tr><th>ID</th><th>Pergunta</th><th>Resposta</th><th>Fonte</th><th></th></tr></thead>
+      <tbody>
+      {% for qa in qas %}
+        <tr>
+          <td>{{ qa.id }}</td>
+          <td>{{ qa.question[:80] }}{% if qa.question|length > 80 %}...{% endif %}</td>
+          <td>{{ qa.answer[:120] }}{% if qa.answer|length > 120 %}...{% endif %}</td>
+          <td>{{ qa.source }}</td>
+          <td>
+            <form method="post" action="/admin/delete/{{ qa.id }}" onsubmit="return confirm('Deletar?');">
+              <button type="submit">Deletar</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</body>
+</html>

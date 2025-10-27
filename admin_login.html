@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Airá — Admin Login</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <div class="container">
+    <h1>Login Admin</h1>
+    {% if error %}
+      <div class="error">{{ error }}</div>
+    {% endif %}
+    <form method="post" action="/admin">
+      <label>Código numérico</label>
+      <input name="code" inputmode="numeric" pattern="[0-9]*" autocomplete="one-time-code" maxlength="10">
+      <button type="submit">Entrar</button>
+    </form>
+    <p><a href="/">Voltar ao chat</a></p>
+  </div>
+</body>
+</html>
